@@ -25,6 +25,7 @@ Please submit improvements. :)
 
 from pox.core import core
 import pox
+import thread
 log = core.getLogger("iplb")
 
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
@@ -358,6 +359,7 @@ def round_robin_alg (balancer):
 
   return server_selected
 # TODO(lcfpadilha): improve least bandwidth (getting the throughput).
+# TODO(lcfpadilha): get packet size inside flow table
 def least_bandwidth_alg (balancer):
   length = len(balancer.live_servers.keys())
   servers = list(balancer.live_servers.keys())
@@ -435,7 +437,6 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   import logging
   logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
 
-
   def _handle_ConnectionUp (event):
     global _dpid
     if _dpid is None:
@@ -456,5 +457,19 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
       # Gross hack
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
-      
-  core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
+
+  def open_prompt ():
+    prompt = 'loadbalancer-algorithm>'
+    time.sleep(10)
+    while True:
+      line = raw_input(prompt)
+      if line in ALGORITHM_LIST: 
+        print("Changing algotithm to ", line)
+
+  try:
+    core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
+    thread.start_new_thread(open_prompt, ())
+  except:
+    #TODO(lcfpadilha): improve errors log
+    log.error("Cannot start the load balancer!") 
+    exit(1)
