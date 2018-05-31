@@ -41,7 +41,7 @@ import random
 
 FLOW_IDLE_TIMEOUT = 10
 FLOW_MEMORY_TIMEOUT = 60 * 5
-UPDATE_PACKET_COUNT = 14
+UPDATE_DATA_TRANSFERRED = 14
 
 class MemoryEntry (object):
   """
@@ -105,13 +105,13 @@ class iplb (object):
     self.alg = algorithm
     self.round_robin_index = 0
     self.round_robin_pck_sent = 0
-    self.packet_count = {}
+    self.data_transferred = {}
     self.last_update = time.time()
     self.weights = weights
     self.probabilities = self._get_probabilities_for_servers()
 
     for server in self.servers:
-      self.packet_count[server] = 0
+      self.data_transferred[server] = 0
 
     try:
       self.log = log.getChild(dpid_to_str(self.con.dpid))
@@ -152,7 +152,7 @@ class iplb (object):
         if ip in self.live_servers:
           self.log.warn("Server %s down", ip)
           del self.live_servers[ip]
-          del self.packet_count[ip]
+          del self.data_transferred[ip]
           del self.weights[ip]
           self.round_robin_pck_sent = 0
           self.probabilities = self._get_probabilities_for_servers()
@@ -247,7 +247,7 @@ class iplb (object):
             else:
               # Ooh, new server.
               self.live_servers[arpp.protosrc] = arpp.hwsrc,inport
-              self.packet_count[arpp.protosrc] = 0
+              self.data_transferred[arpp.protosrc] = 0
               if arpp.protosrc not in self.weights.keys():
                 self.weights[arpp.protosrc] = 1
               self.probabilities = self._get_probabilities_for_servers()
@@ -262,18 +262,18 @@ class iplb (object):
 
     # Update the packets count table, if needed.
     
-    # if time.time() - self.last_update > UPDATE_PACKET_COUNT:
-    #   for server in self.packet_count.keys():
-    #     self.packet_count[server] = 0
-    #   self.last_update = time.time()
+    if time.time() - self.last_update > UPDATE_DATA_TRANSFERRED:
+      for server in self.data_transferred.keys():
+        self.data_transferred[server] = 0
+      self.last_update = time.time()
 
     # Count the packets if it's from one of our servers.
-    if ipp.srcip in self.packet_count.keys():
-      self.packet_count[IPAddr(ipp.srcip)] += packet.payload_len
+    if ipp.srcip in self.data_transferred.keys():
+      self.data_transferred[IPAddr(ipp.srcip)] += packet.payload_len
 
     # Count the packets if it's to one of our servers.
-    if ipp.dstip in self.packet_count.keys():
-      self.packet_count[IPAddr(ipp.dstip)] += packet.payload_len
+    if ipp.dstip in self.data_transferred.keys():
+      self.data_transferred[IPAddr(ipp.dstip)] += packet.payload_len
 
     if ipp.srcip in self.servers:
       # It's FROM one of our balanced servers.
@@ -357,8 +357,8 @@ def round_robin_alg (balancer):
     balancer.round_robin_pck_sent = 0
 
   return server_selected
-
-def least_packets_alg (balancer):
+# TODO(lcfpadilha): improve least bandwidth (getting the throughput).
+def least_bandwidth_alg (balancer):
   length = len(balancer.live_servers.keys())
   servers = list(balancer.live_servers.keys())
 
@@ -366,7 +366,7 @@ def least_packets_alg (balancer):
     if balancer.weights[servers[i]] > 0:
       best_server = servers[i]
       for ii in range(i+1, length):
-        if balancer.packet_count[best_server] * balancer.weights[servers[ii]] > balancer.packet_count[servers[ii]] * balancer.weights[best_server]:
+        if balancer.data_transferred[best_server] * balancer.weights[servers[ii]] > balancer.data_transferred[servers[ii]] * balancer.weights[best_server]:
           best_server = servers[ii]
 
       return best_server
@@ -383,7 +383,7 @@ def random_alg (balancer):
 
 ALGORITHM_LIST = { 
   'round-robin': round_robin_alg, 
-  'least-packets': least_packets_alg, 
+  'least-bandwidth': least_bandwidth_alg, 
   'random': random_alg 
 }
 
@@ -456,5 +456,5 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
       # Gross hack
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
-
+      
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
