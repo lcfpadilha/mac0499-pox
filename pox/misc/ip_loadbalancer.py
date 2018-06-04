@@ -109,7 +109,6 @@ class iplb (object):
     self.data_transferred = {}
     self.last_update = time.time()
     self.weights = weights
-    self.probabilities = self._get_probabilities_for_servers()
 
     for server in self.servers:
       self.data_transferred[server] = 0
@@ -138,6 +137,30 @@ class iplb (object):
     # As part of a gross hack, we now do this from elsewhere
     #self.con.addListeners(self)
 
+    core.Interactive.variables['change_algorithm'] = self._change_algorithm
+    core.Interactive.variables['change_weights'] = self._change_weights
+
+  def _change_algorithm(self, algorithm):
+    """
+    Change the algorithm for load balancing.
+    """
+    if algorithm not in ALGORITHM_LIST:
+      log.error("Algorithm %s is not allowed, allowed algorithms: %s", algorithm, ALGORITHM_LIST.keys())
+    else:
+      self.alg = algorithm
+      log.info("Set algorithm to %s.", self.alg)
+
+  def _change_weights(self, weights):
+    """
+    Change the weights for each server in the balancing.
+    """
+    if type(weights) is not dict:
+      log.error("Weigths should be a dictionary { IP: WEIGHT }.")
+    elif sorted(weights.keys()) != sorted(self.weights.keys()):
+      log.error("Weights needs to contains all servers")
+    else:
+      self.weights = { IPAddr(ip): weight for ip, weight in weights.items() }
+
   def _do_expire (self):
     """
     Expire probes and "memorized" flows
@@ -156,7 +179,6 @@ class iplb (object):
           del self.data_transferred[ip]
           del self.weights[ip]
           self.round_robin_pck_sent = 0
-          self.probabilities = self._get_probabilities_for_servers()
 
     # Expire old flows
     c = len(self.memory)
@@ -209,17 +231,8 @@ class iplb (object):
     """
     Pick a server for a (hopefully) new connection
     """
+    log.info("Balancing done by the %s algorithm.", self.alg)
     return ALGORITHM_LIST[self.alg](self)
-
-  def _get_probabilities_for_servers(self):
-    """
-    Return an array with the probability of each server being chosen
-    """
-    total_weight = sum(self.weights.values())
-    probabilities = {}
-    for server in self.live_servers.keys():
-      probabilities[server] = float(self.weights[server]) / float(total_weight)
-    return probabilities
 
   def _handle_PacketIn (self, event):
     inport = event.port
@@ -251,7 +264,6 @@ class iplb (object):
               self.data_transferred[arpp.protosrc] = 0
               if arpp.protosrc not in self.weights.keys():
                 self.weights[arpp.protosrc] = 1
-              self.probabilities = self._get_probabilities_for_servers()
               self.log.info("Server %s up", arpp.protosrc)
         return
 
@@ -342,9 +354,6 @@ class iplb (object):
 # Remember which DPID we're operating on (first one to connect)
 _dpid = None
 
-# TODO(lcfpadilha): round-robin, least-packets, random can inherit methods 
-# from ipbl
-
 # Round-robin load balancer algorithm
 def round_robin_alg (balancer):
   length = len(balancer.live_servers.keys())
@@ -374,14 +383,7 @@ def least_bandwidth_alg (balancer):
       return best_server
 
 def random_alg (balancer):
-  servers = balancer.live_servers.keys()
-  probabilities = balancer.probabilities
-  rand_numb = random.random()
-
-  for server in servers:
-    if rand_numb <= probabilities[server]:
-      return server
-    rand_numb -= probabilities[server]
+  return random.choice(balancer.live_servers.keys())
 
 ALGORITHM_LIST = { 
   'round-robin': round_robin_alg, 
@@ -391,12 +393,15 @@ ALGORITHM_LIST = {
 
 def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   global _dpid
+  global _algorithm
+
   if dpid is not None:
     _dpid = str_to_dpid(dpid)
 
   if algorithm not in ALGORITHM_LIST:
     log.error("Algorithm %s is not allowed, allowed algorithms: %s", algorithm, ALGORITHM_LIST.keys())
     exit(1)
+  _algorithm = algorithm
 
   # Getting the servers IP.
   servers = servers.replace(","," ").split()
@@ -458,18 +463,4 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
 
-  def open_prompt ():
-    prompt = 'loadbalancer-algorithm>'
-    time.sleep(10)
-    while True:
-      line = raw_input(prompt)
-      if line in ALGORITHM_LIST: 
-        print("Changing algotithm to ", line)
-
-  try:
-    core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
-    thread.start_new_thread(open_prompt, ())
-  except:
-    #TODO(lcfpadilha): improve errors log
-    log.error("Cannot start the load balancer!") 
-    exit(1)
+  core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
