@@ -377,10 +377,6 @@ class iplb (object):
       
       self.con.send(msg)
 
-
-# Remember which DPID we're operating on (first one to connect)
-_dpid = None
-
 def round_robin_alg (balancer):
   """
   Select the next server for load balancing using the round-robin algorithm.
@@ -434,6 +430,9 @@ ALGORITHM_LIST = {
   'random': random_alg 
 }
 
+# Remember which DPID we're operating on (first one to connect)
+_dpid = None
+
 def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   global _dpid
   global _algorithm
@@ -445,7 +444,6 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
     log.error("Algorithm %s is not allowed, allowed algorithms: %s", 
       algorithm, ALGORITHM_LIST.keys())
     exit(1)
-  _algorithm = algorithm
 
   # Getting the servers IP.
   servers = servers.replace(","," ").split()
