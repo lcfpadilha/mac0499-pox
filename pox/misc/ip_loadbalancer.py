@@ -13,12 +13,24 @@
 # limitations under the License.
 
 """
-A very sloppy IP load balancer.
+An IP load balancer that allows user to select the load balancer algorithm and
+the weights for each server.
 
 Run it with --ip=<Service IP> --servers=IP1,IP2,...
 
 By default, it will do load balancing on the first switch that connects.  If
 you want, you can add --dpid=<dpid> to specify a particular switch.
+
+Also by default, the load balancer algorithm will be random, if you want to 
+change it, add --algorithm=<algorithm> (you can select random, round-robin or
+least-bandwidth). You can select the weights for each server using
+--weight=WEIGHT_IP1,WEIGHT_IP2,... in the same order as the servers.
+
+If you run with py module, you will be able to change the algorithm any time,
+using:
+POX> change_algorithm(<algorithm>)
+You can also change the weights for each server:
+POX> change_weights({"IP1": WEIGHT1, ... })
 
 Please submit improvements. :)
 """
@@ -90,10 +102,11 @@ class MemoryEntry (object):
 
 class iplb (object):
   """
-  A simple IP load balancer
+  An IP load balancer
 
   Give it a service_ip and a list of server IP addresses.  New TCP flows
-  to service_ip will be randomly redirected to one of the servers.
+  to service_ip will be redirected to one of the servers using the selected 
+  algorithm and using the weights map.
 
   We probe the servers to see if they're alive by sending them ARPs.
   """
@@ -103,15 +116,8 @@ class iplb (object):
     self.con = connection
     self.mac = self.con.eth_addr
     self.live_servers = {} # IP -> MAC,port
-    self.alg = algorithm
-    self.round_robin_index = 0
-    self.round_robin_pck_sent = 0
-    self.data_transferred = {}
-    self.last_update = time.time()
+    self.algorithm = algorithm
     self.weights = weights
-
-    for server in self.servers:
-      self.data_transferred[server] = 0
 
     try:
       self.log = log.getChild(dpid_to_str(self.con.dpid))
@@ -123,6 +129,19 @@ class iplb (object):
 
     # How quickly do we probe?
     self.probe_cycle_time = 5
+
+    # Last update in the map of data transferred.
+    self.last_update = time.time()
+
+    # Data transferred map (IP -> data transferred in the last 
+    # UPDATE_DATA_TRANSFERRED seconds).
+    self.data_transferred = {}
+    for server in self.servers:
+      self.data_transferred[server] = 0
+
+    # Variables used in round-robin algorithm.
+    self.round_robin_index = 0
+    self.round_robin_pck_sent = 0
 
     # How long do we wait for an ARP reply before we consider a server dead?
     self.arp_timeout = 3
@@ -137,6 +156,7 @@ class iplb (object):
     # As part of a gross hack, we now do this from elsewhere
     #self.con.addListeners(self)
 
+    # Allow user to change algorithm and weights at any time.
     core.Interactive.variables['change_algorithm'] = self._change_algorithm
     core.Interactive.variables['change_weights'] = self._change_weights
 
@@ -145,10 +165,11 @@ class iplb (object):
     Change the algorithm for load balancing.
     """
     if algorithm not in ALGORITHM_LIST:
-      log.error("Algorithm %s is not allowed, allowed algorithms: %s", algorithm, ALGORITHM_LIST.keys())
+      log.error("Algorithm %s is not allowed, allowed algorithms: %s", 
+        algorithm, ALGORITHM_LIST.keys())
     else:
-      self.alg = algorithm
-      log.info("Set algorithm to %s.", self.alg)
+      self.algorithm = algorithm
+      log.info("Setting algorithm to %s.", self.algorithm)
 
   def _change_weights(self, weights):
     """
@@ -160,6 +181,7 @@ class iplb (object):
       log.error("Weights needs to contains all servers")
     else:
       self.weights = { IPAddr(ip): weight for ip, weight in weights.items() }
+      log.info("Setting weights to %s.", self.weights)
 
   def _do_expire (self):
     """
@@ -176,8 +198,10 @@ class iplb (object):
         if ip in self.live_servers:
           self.log.warn("Server %s down", ip)
           del self.live_servers[ip]
+          # Delete each entry in the table.
           del self.data_transferred[ip]
           del self.weights[ip]
+          # Set the count of packet for round robin as 0.
           self.round_robin_pck_sent = 0
 
     # Expire old flows
@@ -231,8 +255,8 @@ class iplb (object):
     """
     Pick a server for a (hopefully) new connection
     """
-    log.info("Balancing done by the %s algorithm.", self.alg)
-    return ALGORITHM_LIST[self.alg](self)
+    self.log.debug("Balancing done by the %s algorithm.", self.algorithm)
+    return ALGORITHM_LIST[self.algorithm](self)
 
   def _handle_PacketIn (self, event):
     inport = event.port
@@ -273,18 +297,17 @@ class iplb (object):
     # It's TCP.
     ipp = packet.find('ipv4')
 
-    # Update the packets count table, if needed.
-    
+    # Update the data count table, if needed.
     if time.time() - self.last_update > UPDATE_DATA_TRANSFERRED:
       for server in self.data_transferred.keys():
         self.data_transferred[server] = 0
       self.last_update = time.time()
 
-    # Count the packets if it's from one of our servers.
+    # Count the data transferred if it's from one of our servers.
     if ipp.srcip in self.data_transferred.keys():
       self.data_transferred[IPAddr(ipp.srcip)] += packet.payload_len
 
-    # Count the packets if it's to one of our servers.
+    # Count the data transferred if it's to one of our servers.
     if ipp.dstip in self.data_transferred.keys():
       self.data_transferred[IPAddr(ipp.dstip)] += packet.payload_len
 
@@ -312,7 +335,9 @@ class iplb (object):
       actions.append(of.ofp_action_nw_addr.set_src(self.service_ip))
       actions.append(of.ofp_action_output(port = entry.client_port))
       match = of.ofp_match.from_packet(packet, inport)
-      msg = of.ofp_packet_out(data=event.ofp, actions=actions,in_port=inport)
+      msg = of.ofp_packet_out(data = event.ofp, 
+                              actions = actions, 
+                              in_port = inport)
       
       self.con.send(msg)
 
@@ -346,7 +371,9 @@ class iplb (object):
       actions.append(of.ofp_action_output(port = port))
       match = of.ofp_match.from_packet(packet, inport)
 
-      msg = of.ofp_packet_out(data=event.ofp, actions=actions,in_port=inport)
+      msg = of.ofp_packet_out(data = event.ofp, 
+                              actions = actions,
+                              in_port = inport)
       
       self.con.send(msg)
 
@@ -354,8 +381,10 @@ class iplb (object):
 # Remember which DPID we're operating on (first one to connect)
 _dpid = None
 
-# Round-robin load balancer algorithm
 def round_robin_alg (balancer):
+  """
+  Select the next server for load balancing using the round-robin algorithm.
+  """
   length = len(balancer.live_servers.keys())
   if balancer.round_robin_index >= length:
     balancer.round_robin_index = 0
@@ -367,24 +396,38 @@ def round_robin_alg (balancer):
     balancer.round_robin_pck_sent = 0
 
   return server_selected
+
 # TODO(lcfpadilha): improve least bandwidth (getting the throughput).
 # TODO(lcfpadilha): get packet size inside flow table
 def least_bandwidth_alg (balancer):
+  """
+  Select the next server for load balancing using the least bandwidth algorithm.
+  """
   length = len(balancer.live_servers.keys())
   servers = list(balancer.live_servers.keys())
+  data_transferred = balancer.data_transferred
+  weights = balancer.weights
 
   for i in range(length):
-    if balancer.weights[servers[i]] > 0:
+    if weights[servers[i]] > 0:
       best_server = servers[i]
-      for ii in range(i+1, length):
-        if balancer.data_transferred[best_server] * balancer.weights[servers[ii]] > balancer.data_transferred[servers[ii]] * balancer.weights[best_server]:
+
+      # Weighted least-bandwidth based on weighted least-connection scheduling
+      # algorithm (see http://kb.linuxvirtualserver.org/wiki/Weighted_Least-Connection_Scheduling)
+      for ii in range(i + 1, length):
+        if data_transferred[best_server] * weights[servers[ii]] > \
+         data_transferred[servers[ii]] * weights[best_server]:
           best_server = servers[ii]
 
       return best_server
 
 def random_alg (balancer):
+  """
+  Select a random server for load balancer.
+  """
   return random.choice(balancer.live_servers.keys())
 
+# List of algorithms allowed in the load balancer.
 ALGORITHM_LIST = { 
   'round-robin': round_robin_alg, 
   'least-bandwidth': least_bandwidth_alg, 
@@ -399,7 +442,8 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
     _dpid = str_to_dpid(dpid)
 
   if algorithm not in ALGORITHM_LIST:
-    log.error("Algorithm %s is not allowed, allowed algorithms: %s", algorithm, ALGORITHM_LIST.keys())
+    log.error("Algorithm %s is not allowed, allowed algorithms: %s", 
+      algorithm, ALGORITHM_LIST.keys())
     exit(1)
   _algorithm = algorithm
 
@@ -407,7 +451,7 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   servers = servers.replace(","," ").split()
   servers = [IPAddr(x) for x in servers]
 
-  # Getting the weights of each server.
+  # Parsing the weights for each server.
   weights = {}
   if len(weights_val) is 0:
     weights_val = ""
@@ -415,7 +459,7 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
       weights_val += "1,"
 
   weights_val = weights_val.replace(",", " ").split()
-  
+
   if len(weights_val) is not len(servers):
     log.error("Weights array is not the same length than servers array")
     exit(1)
@@ -430,6 +474,7 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   # so we do some disgusting hackery and then boot it up.
   from proto.arp_responder import ARPResponder
   old_pi = ARPResponder._handle_PacketIn
+
   def new_pi (self, event):
     if event.dpid == _dpid:
       # Yes, the packet-in is on the right switch
@@ -439,6 +484,7 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
   # Hackery done.  Now start it.
   from proto.arp_responder import launch as arp_launch
   arp_launch(eat_packets=False,**{str(ip):True})
+
   import logging
   logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
 
