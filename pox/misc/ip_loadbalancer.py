@@ -99,6 +99,9 @@ class MemoryEntry (object):
 
     return self.server,ipp.srcip,tcpp.dstport,tcpp.srcport
 
+class ofp_action_get_packet(of.ofp_action_base):
+  def __init__ (self):
+    print("EITA ROGERIN")
 
 class iplb (object):
   """
@@ -334,7 +337,18 @@ class iplb (object):
       actions.append(of.ofp_action_dl_addr.set_src(self.mac))
       actions.append(of.ofp_action_nw_addr.set_src(self.service_ip))
       actions.append(of.ofp_action_output(port = entry.client_port))
-      match = of.ofp_match.from_packet(packet, inport)
+      actions.append(ofp_action_get_packet())
+      # match = of.ofp_match.from_packet(packet, inport)
+
+      # msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
+      #                       idle_timeout=FLOW_IDLE_TIMEOUT,
+      #                       hard_timeout=of.OFP_FLOW_PERMANENT,
+      #                       data=event.ofp,
+      #                       actions=actions,
+      #                       match=match)
+
+      # We don't change the flow table because we need to know how much 
+      # bandwidth we use.
       msg = of.ofp_packet_out(data = event.ofp, 
                               actions = actions, 
                               in_port = inport)
@@ -369,8 +383,17 @@ class iplb (object):
       actions.append(of.ofp_action_dl_addr.set_dst(mac))
       actions.append(of.ofp_action_nw_addr.set_dst(entry.server))
       actions.append(of.ofp_action_output(port = port))
-      match = of.ofp_match.from_packet(packet, inport)
+      # match = of.ofp_match.from_packet(packet, inport)
 
+      # msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
+      #                       idle_timeout=FLOW_IDLE_TIMEOUT,
+      #                       hard_timeout=of.OFP_FLOW_PERMANENT,
+      #                       data=event.ofp,
+      #                       actions=actions,
+      #                       match=match)
+
+      # We don't change the flow table because we need to know how much 
+      # bandwidth we use.
       msg = of.ofp_packet_out(data = event.ofp, 
                               actions = actions,
                               in_port = inport)
@@ -393,8 +416,6 @@ def round_robin_alg (balancer):
 
   return server_selected
 
-# TODO(lcfpadilha): improve least bandwidth (getting the throughput).
-# TODO(lcfpadilha): get packet size inside flow table
 def least_bandwidth_alg (balancer):
   """
   Select the next server for load balancing using the least bandwidth algorithm.
