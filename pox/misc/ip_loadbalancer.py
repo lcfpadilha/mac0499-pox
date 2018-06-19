@@ -47,12 +47,15 @@ from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.revent import EventRemove
 from pox.lib.util import str_to_bool, dpid_to_str, str_to_dpid
 
+# include as part of the betta branch
+from pox.openflow.of_json import *
+
 import pox.openflow.libopenflow_01 as of
 
 import time
 import random
 
-FLOW_IDLE_TIMEOUT = 10
+FLOW_IDLE_TIMEOUT = 5
 FLOW_MEMORY_TIMEOUT = 60 * 5
 UPDATE_DATA_TRANSFERRED = 14
 
@@ -98,10 +101,6 @@ class MemoryEntry (object):
     tcpp = ethp.find('tcp')
 
     return self.server,ipp.srcip,tcpp.dstport,tcpp.srcport
-
-class ofp_action_get_packet(of.ofp_action_base):
-  def __init__ (self):
-    print("EITA ROGERIN")
 
 class iplb (object):
   """
@@ -306,14 +305,6 @@ class iplb (object):
         self.data_transferred[server] = 0
       self.last_update = time.time()
 
-    # Count the data transferred if it's from one of our servers.
-    if ipp.srcip in self.data_transferred.keys():
-      self.data_transferred[IPAddr(ipp.srcip)] += packet.payload_len
-
-    # Count the data transferred if it's to one of our servers.
-    if ipp.dstip in self.data_transferred.keys():
-      self.data_transferred[IPAddr(ipp.dstip)] += packet.payload_len
-
     if ipp.srcip in self.servers:
       # It's FROM one of our balanced servers.
       # Rewrite it BACK to the client
@@ -337,21 +328,14 @@ class iplb (object):
       actions.append(of.ofp_action_dl_addr.set_src(self.mac))
       actions.append(of.ofp_action_nw_addr.set_src(self.service_ip))
       actions.append(of.ofp_action_output(port = entry.client_port))
-      actions.append(ofp_action_get_packet())
-      # match = of.ofp_match.from_packet(packet, inport)
+      match = of.ofp_match.from_packet(packet, inport)
 
-      # msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
-      #                       idle_timeout=FLOW_IDLE_TIMEOUT,
-      #                       hard_timeout=of.OFP_FLOW_PERMANENT,
-      #                       data=event.ofp,
-      #                       actions=actions,
-      #                       match=match)
-
-      # We don't change the flow table because we need to know how much 
-      # bandwidth we use.
-      msg = of.ofp_packet_out(data = event.ofp, 
-                              actions = actions, 
-                              in_port = inport)
+      msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
+                            idle_timeout=FLOW_IDLE_TIMEOUT,
+                            hard_timeout=of.OFP_FLOW_PERMANENT,
+                            data=event.ofp,
+                            actions=actions,
+                            match=match)
       
       self.con.send(msg)
 
@@ -383,20 +367,14 @@ class iplb (object):
       actions.append(of.ofp_action_dl_addr.set_dst(mac))
       actions.append(of.ofp_action_nw_addr.set_dst(entry.server))
       actions.append(of.ofp_action_output(port = port))
-      # match = of.ofp_match.from_packet(packet, inport)
+      match = of.ofp_match.from_packet(packet, inport)
 
-      # msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
-      #                       idle_timeout=FLOW_IDLE_TIMEOUT,
-      #                       hard_timeout=of.OFP_FLOW_PERMANENT,
-      #                       data=event.ofp,
-      #                       actions=actions,
-      #                       match=match)
-
-      # We don't change the flow table because we need to know how much 
-      # bandwidth we use.
-      msg = of.ofp_packet_out(data = event.ofp, 
-                              actions = actions,
-                              in_port = inport)
+      msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
+                            idle_timeout=FLOW_IDLE_TIMEOUT,
+                            hard_timeout=of.OFP_FLOW_PERMANENT,
+                            data=event.ofp,
+                            actions=actions,
+                            match=match)
       
       self.con.send(msg)
 
@@ -435,7 +413,6 @@ def least_bandwidth_alg (balancer):
         if data_transferred[best_server] * weights[servers[ii]] > \
          data_transferred[servers[ii]] * weights[best_server]:
           best_server = servers[ii]
-
       return best_server
 
 def random_alg (balancer):
@@ -528,4 +505,27 @@ def launch (ip, servers, weights_val = [], dpid = None, algorithm = 'random'):
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
 
+  def _handle_FlowStatsReceived (event):
+    for f in event.stats:
+      ip_dst = f.match.nw_dst
+      ip_src = f.match.nw_src
+
+      if ip_dst != None and IPAddr(ip_dst) in core.iplb.servers:
+        core.iplb.data_transferred[IPAddr(ip_dst)] += f.byte_count
+
+      if ip_src != None and IPAddr(ip_src) in core.iplb.servers:
+        core.iplb.data_transferred[IPAddr(ip_src)] += f.byte_count
+
+  core.openflow.addListenerByName("FlowStatsReceived", _handle_FlowStatsReceived)
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
+
+  from pox.lib.recoco import Timer
+
+  # Send the flow stats to all the switches connected to the controller.
+  def _timer_func ():
+    for connection in core.openflow._connections.values():
+      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
+
+  # Request flow stats every FLOW_IDLE_TIMEOUT second.
+  Timer(FLOW_IDLE_TIMEOUT, _timer_func, recurring=True) 
+
